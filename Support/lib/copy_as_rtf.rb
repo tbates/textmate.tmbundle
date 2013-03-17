@@ -55,63 +55,39 @@ class RtfExporter
     return "\\red#{r}\\green#{g}\\blue#{b};"
   end
   
-  def generate_stylesheet_from_theme(theme_class = nil)
-    theme_class = '' if theme_class == nil
+  def generate_stylesheet_from_theme
     require "#{ENV['TM_SUPPORT_PATH']}/lib/osx/plist"
 
-    # Load TM preferences to discover the current theme and font settings
-    textmate_pref_file = '~/Library/Preferences/com.macromates.textmate.plist'
-    prefs = OSX::PropertyList.load(File.open(File.expand_path(textmate_pref_file)))
-    theme_uuid = prefs['OakThemeManagerSelectedTheme']
-    # Load the active theme. Unfortunately, this requires us to scan through
-    # all discoverable theme files...
-    unless theme_plist = find_theme(theme_uuid)
+    unless theme_plist = load_theme
       print "Could not locate your theme file or it may be corrupt or unparsable!"
       abort
     end
 
-    theme_comment = theme_plist['comment']
-    theme_name = theme_plist['name']
-    theme_class.replace(theme_name)
-    theme_class.downcase!
-    theme_class.gsub!(/[^a-z0-9_-]/, '_')
-    theme_class.gsub!(/_+/, '_')
-
-    @font_name = prefs['OakTextViewNormalFontName'] || 'Monaco'
-    @font_size = (prefs['OakTextViewNormalFontSize'] || 11).to_s
+    @font_name = `"$TM_QUERY" --setting fontName`.chomp || 'Menlo-Regular'
+    @font_size = (`"$TM_QUERY" --setting fontSize`.chomp || 12).to_s
     @font_size.sub! /\.\d+$/, ''
-    @font_size = @font_size.to_i * 3
+    @font_size = @font_size.to_i * 2
     
     @font_name = '"' + @font_name + '"' if @font_name.include?(' ') &&
       !@font_name.include?('"')
-      
-
+    
     theme_plist['settings'].each do | setting |
       if (!setting['name'] and setting['settings'])
-        body_bg = setting['settings']['background'] || '#ffffff'
-        @body_bg ||= body_bg
         body_fg = setting['settings']['foreground'] || '#000000'
-        selection_bg = setting['settings']['selection']
-        body_bg = hex_color_to_rtf(body_bg)
         body_fg = hex_color_to_rtf(body_fg)
-        selection_bg = hex_color_to_rtf(selection_bg) if selection_bg
         @colors << body_fg
+        @colors = body_fg + @colors
         next
       end
       if setting['name'] && setting['scope']
         scope_name = setting['scope']
-        # scope_name.gsub! /(^|[ ])-[^ ]+/, '' # strip negated scopes
-        # scope_name.gsub! /\./, '_' # change inner '.' to '_'
-        # #scope_name.gsub! /(^|[ ])/, '\1.'
-        # scope_name.gsub! /[ ]/, '_' # spaces to underscores
-        # scope_name.gsub! /(^|,\s+)/m, '\1'
         add_style_from_textmate_theme scope_name, setting['settings']
       end
     end
   end
 
   def color_table
-    "{\\colortbl;#{@colors}}"
+    "{\\colortbl#{@colors}}"
   end
   
   def font_table
@@ -138,29 +114,8 @@ RTF_DOC
   # \\tab\\tab\\i \\cf3 Another line
   # }}
   
-  # Search heuristic is based on the Theme Builder bundle's
-  # "Create for Current Language" command
-  def find_theme(uuid)
-    theme_dirs = [
-      File.expand_path('~/Library/Application Support/TextMate/Themes'),
-      '/Library/Application Support/TextMate/Themes',
-      TextMate.app_path + '/Contents/SharedSupport/Themes'
-    ]
-
-    theme_dirs.each do |theme_dir|
-      if File.exists? theme_dir
-        themes = Dir.entries(theme_dir).find_all { |theme| theme =~ /.+\.(tmTheme|plist)$/ }
-        themes.each do |theme|
-          begin
-            plist = OSX::PropertyList.load(File.open("#{theme_dir}/#{theme}"))
-            return plist if plist["uuid"] == uuid
-          rescue OSX::PropertyListError => e
-            # puts "Error parsing theme #{theme_dir}/#{theme}" - e.g. GitHub.tmTheme has issues
-          end
-        end
-      end
-    end
-    return nil
+  def load_theme
+    return OSX::PropertyList.load(File.open(ENV['TM_CURRENT_THEME_PATH']))
   end
   
   def detab(str, width)
@@ -177,10 +132,17 @@ RTF_DOC
     return lines.join("\n")
   end
   
+  def strip_leading(text, ch = ' ')
+    count = text.gsub(/<[^>]+>/, '').split("\n").map { |e| e =~ /^#{ch}*(?!#{ch}|$)/ ? $&.length : nil }.reject { |e| e.nil? }.min
+    text.send(text.respond_to?(:lines) ? :lines : :to_s).map { |line| count.times { line.sub!(/^((<[^>]+>)*)#{ch}/, '\1') }; line }.join
+  end
+
   def document_to_rtf(input, opt = {})
     # Read the source document / selection
     # Convert tabs to spaces using configured tab width
     input = detab(input, (ENV['TM_TAB_SIZE'] || '2').to_i)
+
+    input = strip_leading(input, " ")
 
     input.gsub! /\\/, "__backslash__"
     input.gsub! /\\n/, "__newline__"
@@ -257,8 +219,7 @@ RTF_DOC
     new_style = cur.merge new_style if new_style
     new_style ||= cur || {}
     unless new_style[:color_index]
-      #45 works for Sunburst theme; 0 for Eiffle or IDLE theme
-      new_style[:color_index] = (@body_bg == '#000000') ? 45 : 0
+      new_style[:color_index] = 0
     end
     @style_stack.unshift new_style
     new_style
